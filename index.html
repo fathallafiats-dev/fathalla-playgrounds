@@ -510,9 +510,6 @@ footer{background:var(--bl);color:var(--gl);text-align:center;padding:12px;font-
 
     <!-- Gym tab -->
     <div id="t-gm" class="atc"><div class="card" style="margin:0">
-      <div style="display:flex;justify-content:flex-end;margin-bottom:10px">
-        <button class="bsm gn" onclick="openManualGymSub()"><i class="ti ti-user-plus"></i> اشتراك جيم يدوي (بتاريخ حر)</button>
-      </div>
       <div id="gm-filters" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
         <input type="text" class="flt-in" data-key="userName" placeholder="بحث بالاسم..." oninput="renderAdGm()" style="flex:1;min-width:140px;padding:9px;border:1px solid var(--bor);border-radius:8px;font-family:Tajawal;font-size:13px">
         <input type="text" class="flt-in" data-key="planName" placeholder="بحث بالخطة/الأكاديمية..." oninput="renderAdGm()" style="flex:1;min-width:140px;padding:9px;border:1px solid var(--bor);border-radius:8px;font-family:Tajawal;font-size:13px">
@@ -1213,7 +1210,41 @@ async function loadAll(){
   showLov(false);
 }
 
-async function saveAll(){
+// ======== SAFETY GUARD: يمنع كتابة أرايات فاضية فوق بيانات حقيقية موجودة على السيرفر ========
+// السبب الشائع لمسح البيانات بالغلط: تحميل ناقص/خطأ مؤقت يخلي D.bookings (مثلاً) فاضية
+// في المتصفح، وبعدها أي حفظ عادي كان بيكتب الفراغ ده فوق فايربيز ويمسح كل حاجة.
+async function guardAgainstEmptyOverwrite(name, localArrEmpty){
+  if(!localArrEmpty) return true; // فيه بيانات محلية، مفيش داعي للتحقق
+  try{
+    const remote = await fbGet(name);
+    const remoteHasData = remote && Object.keys(remote).filter(k=>k!=='_e').length>0;
+    if(remoteHasData){
+      console.error('BLOCKED: محاولة كتابة "'+name+'" فاضية فوق بيانات حقيقية على السيرفر');
+      alert('⚠️ تم إيقاف الحفظ لحماية بياناتك.\nيبدو أن قسم "'+name+'" فاضي في المتصفح حاليًا بينما فيه بيانات محفوظة فعليًا على السيرفر.\nمن فضلك أعد تحميل الصفحة (F5) وحاول تاني بدل ما تكمل، عشان منمسحش حاجة بالغلط.');
+      return false;
+    }
+    return true;
+  }catch(e){
+    console.error('تعذر التحقق من '+name+' قبل الحفظ:',e);
+    alert('⚠️ تم إيقاف الحفظ: تعذر التأكد من سلامة البيانات. أعد تحميل الصفحة وحاول مرة أخرى.');
+    return false;
+  }
+}
+
+// نسخة احتياطية سريعة قبل أي عملية مسح متعمدة (تُستخدم من clearAll فقط)
+async function backupBeforeWipe(){
+  try{
+    const [bk,gm,mb]=await Promise.all([fbGet('bookings'),fbGet('gymBookings'),fbGet('members')]);
+    const ts=new Date().toISOString().replace(/[:.]/g,'-');
+    await fbPut('backups/'+ts, {bookings:bk||{}, gymBookings:gm||{}, members:mb||{}, at:ts});
+    return true;
+  }catch(e){
+    console.error('فشل أخذ نسخة احتياطية قبل المسح:',e);
+    return false;
+  }
+}
+
+async function saveAll(force){
   const bkObj={}, gmObj={}, mbObj={}, adObj={}, expObj={}, trObj={}, taObj={};
   D.bookings.forEach(b=>{if(b&&b.id)bkObj[b.id]=b;});
   D.gymBookings.forEach(b=>{if(b&&b.id)gmObj[b.id]=b;});
@@ -1222,6 +1253,14 @@ async function saveAll(){
   D.expenses.forEach(e=>{if(e&&e.id)expObj[e.id]=e;});
   D.trainers.forEach(t=>{if(t&&t.code)trObj[t.code]=t;});
   D.trainerAttendance.forEach(a=>{if(a&&a.id)taObj[a.id]=a;});
+  if(!force){
+    const checks=await Promise.all([
+      guardAgainstEmptyOverwrite('bookings', Object.keys(bkObj).length===0),
+      guardAgainstEmptyOverwrite('gymBookings', Object.keys(gmObj).length===0),
+      guardAgainstEmptyOverwrite('members', Object.keys(mbObj).length===0)
+    ]);
+    if(checks.includes(false)) return false;
+  }
   const logo=sessionStorage.getItem('ft_logo')||'';
   const attempts=3;
   for(let attempt=1;attempt<=attempts;attempt++){
@@ -4410,152 +4449,6 @@ async function confirmManualCourtBooking(){
   });
 }
 
-function openManualGymSub(){
-  if(!canManualBook())return;
-  const planOpts=Object.entries(D.gymPlans).map(([k,v])=>`<option value="${k}">${v.n} — ${v.p}ج — ${v.sessions===999?'∞':v.sessions} حصة — ${v.days} يوم</option>`).join('');
-  const today=todayLocalStr();
-  const box=document.createElement('div');
-  box.id='manual-gym-modal';
-  box.style="position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:9999;padding:16px";
-  box.innerHTML=`<div style="background:#fff;border-radius:16px;padding:20px;max-width:400px;width:100%;max-height:85vh;overflow-y:auto">
-    <div style="font-weight:800;font-size:15px;margin-bottom:4px"><i class="ti ti-barbell"></i> اشتراك جيم يدوي</div>
-    <div style="font-size:11px;color:var(--gm);margin-bottom:12px">يمكن اختيار تاريخ بداية سابق لتسجيل اشتراك بأثر رجعي، وتسجيل الاشتراك يتم فورًا بحالة "مفعّل" بدون انتظار موافقة</div>
-    <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px">كود المشترك (إلزامي)</label>
-    <input type="text" id="gs-code" placeholder="مثال: MEM0123" style="width:100%;margin-bottom:4px;padding:9px;border:1px solid var(--bor);border-radius:8px;font-family:monospace;text-transform:uppercase" oninput="gsCodeCheck()">
-    <div id="gs-member-area" style="font-size:11px;color:var(--gm);margin-bottom:10px">اكتب كود المشترك أولاً</div>
-    <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px">خطة الجيم</label>
-    <select id="gs-plan" style="width:100%;margin-bottom:8px;padding:9px;border:1px solid var(--bor);border-radius:8px;font-family:Tajawal" onchange="gsPlanChange()">${planOpts}</select>
-    <div class="fg" style="margin-bottom:8px">
-      <div class="fgr"><label>السعر (ج)</label><input type="number" id="gs-price" min="0" style="padding:9px;border:1px solid var(--bor);border-radius:8px;font-family:Tajawal"></div>
-      <div class="fgr"><label>عدد الحصص</label><input type="number" id="gs-sessions" min="1" style="padding:9px;border:1px solid var(--bor);border-radius:8px;font-family:Tajawal"></div>
-    </div>
-    <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px">مدة الاشتراك (يوم)</label>
-    <input type="number" id="gs-days" min="1" style="width:100%;margin-bottom:8px;padding:9px;border:1px solid var(--bor);border-radius:8px;font-family:Tajawal">
-    <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px">تاريخ بداية الاشتراك</label>
-    <input type="date" id="gs-start" value="${today}" max="${today}" style="width:100%;margin-bottom:10px;padding:9px;border:1px solid var(--bor);border-radius:8px;font-family:Tajawal">
-    <div style="background:var(--op);border:1px solid var(--or);border-radius:8px;padding:10px;margin-bottom:12px">
-      <label style="font-size:12px;font-weight:700;display:flex;align-items:center;gap:6px;margin-bottom:8px"><input type="checkbox" id="gs-att-chk" checked onchange="document.getElementById('gs-att-fields').style.display=this.checked?'block':'none'"> تسجيل حضور مبدئي مع الاشتراك</label>
-      <div id="gs-att-fields">
-        <label style="font-size:11px;font-weight:700;display:block;margin-bottom:4px">تاريخ الحضور</label>
-        <input type="date" id="gs-att-date" value="${today}" max="${today}" style="width:100%;margin-bottom:8px;padding:8px;border:1px solid var(--bor);border-radius:8px;font-family:Tajawal">
-        <label style="font-size:11px;font-weight:700;display:block;margin-bottom:4px">الوقت</label>
-        <input type="time" id="gs-att-time" value="12:00" style="width:100%;padding:8px;border:1px solid var(--bor);border-radius:8px;font-family:Tajawal">
-      </div>
-    </div>
-    <div style="display:flex;gap:8px">
-      <button class="bp" style="flex:1" onclick="confirmManualGymSub()"><i class="ti ti-check"></i> تأكيد الاشتراك</button>
-      <button class="bsm" style="flex:0 0 auto" onclick="document.getElementById('manual-gym-modal').remove()">إلغاء</button>
-    </div>
-  </div>`;
-  document.body.appendChild(box);
-  gsPlanChange();
-}
-function gsPlanChange(){
-  const k=document.getElementById('gs-plan')?.value;const plan=D.gymPlans[k];if(!plan)return;
-  document.getElementById('gs-price').value=plan.p;
-  document.getElementById('gs-sessions').value=plan.sessions===999?1:plan.sessions;
-  document.getElementById('gs-days').value=plan.days||30;
-}
-function gsCodeCheck(){
-  const codeEl=document.getElementById('gs-code');
-  const area=document.getElementById('gs-member-area');
-  if(!codeEl||!area)return;
-  const code=codeEl.value.trim().toUpperCase();
-  if(!code){area.innerHTML='<div style="font-size:11px;color:var(--gm)">اكتب كود المشترك أولاً</div>';return;}
-  const mem=D.members.find(m=>m.code===code);
-  if(mem){
-    area.innerHTML=`<div style="background:#EAFBF3;border:1px solid #1D9E75;border-radius:8px;padding:10px;font-size:12px;margin-bottom:10px">
-      <div style="color:#1D9E75;font-weight:800;margin-bottom:4px"><i class="ti ti-check"></i> مشترك مسجل بالفعل</div>
-      <div><strong>${esc(mem.name)}</strong></div>
-      <div>الفرع: ${esc(mem.branch||'—')}${mem.job?(' | الوظيفة: '+esc(mem.job)):''}</div>
-      ${mem.phone?'<div>واتساب: '+esc(mem.phone)+'</div>':''}
-    </div>`;
-  } else {
-    area.innerHTML=`<div style="background:var(--op);border:1px solid var(--or);border-radius:8px;padding:10px;margin-bottom:10px">
-      <div style="font-size:12px;font-weight:800;color:var(--ord);margin-bottom:8px"><i class="ti ti-user-plus"></i> كود جديد — سجّل بيانات المشترك</div>
-      <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px">الاسم</label>
-      <input type="text" id="gs-new-name" placeholder="اسم المشترك" style="width:100%;margin-bottom:6px;padding:8px;border:1px solid var(--bor);border-radius:8px;font-family:Tajawal">
-      <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px">الفرع</label>
-      <input type="text" id="gs-new-branch" placeholder="الفرع" style="width:100%;margin-bottom:6px;padding:8px;border:1px solid var(--bor);border-radius:8px;font-family:Tajawal">
-      <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px">الوظيفة</label>
-      <input type="text" id="gs-new-job" placeholder="الوظيفة" style="width:100%;margin-bottom:6px;padding:8px;border:1px solid var(--bor);border-radius:8px;font-family:Tajawal">
-      <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px">الواتساب (اختياري)</label>
-      <input type="tel" id="gs-new-phone" placeholder="رقم الواتساب" style="width:100%;padding:8px;border:1px solid var(--bor);border-radius:8px;font-family:Tajawal">
-    </div>`;
-  }
-}
-async function confirmManualGymSub(){
-  if(!canManualBook())return;
-  const code=(document.getElementById('gs-code').value||'').trim().toUpperCase();
-  if(!code){alert('يرجى إدخال كود المشترك');return;}
-  const planId=document.getElementById('gs-plan').value;
-  const plan=D.gymPlans[planId];if(!plan){alert('يرجى اختيار خطة');return;}
-  const price=parseFloat(document.getElementById('gs-price').value)||plan.p;
-  const sessionsInput=parseInt(document.getElementById('gs-sessions').value)||1;
-  const sessions=plan.sessions===999?999:sessionsInput;
-  const days=parseInt(document.getElementById('gs-days').value)||plan.days||30;
-  const startDateStr=document.getElementById('gs-start').value||todayLocalStr();
-  if(new Date(startDateStr+'T00:00:00').getTime()>Date.now()){alert('تاريخ بداية الاشتراك لا يمكن أن يكون في المستقبل');return;}
-
-  let mem=D.members.find(m=>m.code===code);
-  if(!mem){
-    const name=(document.getElementById('gs-new-name')?.value||'').trim();
-    const branch=(document.getElementById('gs-new-branch')?.value||'').trim();
-    const job=(document.getElementById('gs-new-job')?.value||'').trim();
-    const phone=(document.getElementById('gs-new-phone')?.value||'').trim();
-    if(!name||!branch||!job){alert('يرجى إدخال الاسم والفرع والوظيفة لتسجيل المشترك الجديد');return;}
-    mem={name,code,phone,branch,job,bookingCount:0,blocked:false,status:'approved',addedByAdmin:true,registeredAt:Date.now()};
-    D.members.push(mem);
-  }
-  if(isMemberBlocked(mem)){
-    const cont=confirm('⛔ هذا المستخدم محظور ('+blockStatusLabel(mem)+').\nهل تريد رفع الحظر والاستمرار في الاشتراك؟');
-    if(!cont)return;
-    mem.blocked=false;mem.blockedFrom=null;mem.blockedDays=null;
-  }
-  const userCode=mem.code,userName=mem.name,userPhone=mem.phone||'',userBranch=mem.branch||'';
-
-  const startTs=new Date(startDateStr+'T00:00:00').getTime();
-  const expiryDate=startTs+(days*24*3600000);
-  const id='GY'+Date.now().toString().slice(-7);
-  const b={id,type:'gym',userCode,userName,userPhone,userBranch,
-    planId,planName:plan.n,basePrice:plan.p,discPct:0,price,
-    totalSessions:sessions,remainSessions:sessions,usedSessions:0,planDays:days,startDate:startDateStr,
-    isGroup:false,groupId:null,status:'approved',approvedAt:Date.now(),
-    expiryDate,expiryLabel:new Date(expiryDate).toLocaleDateString('ar-EG'),
-    createdAt:Date.now(),createdDate:new Date().toLocaleString('ar-EG'),
-    addedManuallyBy:(D.adminUser&&(D.adminUser.n||D.adminUser.name))||'',
-    attendance:[]};
-
-  // Optional initial attendance record (can be backdated up to today, not the future)
-  const attChecked=document.getElementById('gs-att-chk').checked;
-  let attMsg='';
-  if(attChecked){
-    const attDateStr=document.getElementById('gs-att-date').value||startDateStr;
-    const attTimeStr=document.getElementById('gs-att-time').value||'12:00';
-    const attTs=new Date(attDateStr+'T'+attTimeStr+':00').getTime();
-    if(isNaN(attTs)){alert('تاريخ/وقت الحضور غير صالح');return;}
-    if(attTs>Date.now()){alert('لا يمكن تسجيل حضور بتاريخ في المستقبل');return;}
-    if(attTs<startTs){alert('تاريخ الحضور لا يمكن أن يكون قبل تاريخ بداية الاشتراك');return;}
-    if(attTs>expiryDate){alert('تاريخ الحضور بعد تاريخ انتهاء الاشتراك');return;}
-    if(b.remainSessions!==999)b.remainSessions=(b.remainSessions||0)-1;
-    b.usedSessions=1;
-    b.attendance.push({date:new Date(attTs).toLocaleString('ar-EG'),ts:attTs,manual:true,method:'يدوي',by:(D.adminUser&&(D.adminUser.n||D.adminUser.name))||'',backdated:attDateStr!==todayLocalStr()});
-    attMsg='\nوتم تسجيل حضور بتاريخ: '+new Date(attTs).toLocaleDateString('ar-EG');
-  }
-
-  D.gymBookings.push(b);
-  mem.bookingCount=(mem.bookingCount||0)+1;
-  const ok=await saveAll();
-  if(!ok){
-    D.gymBookings=D.gymBookings.filter(x=>x.id!==id);
-    alert('⚠️ تعذّر الحفظ في قاعدة البيانات — تأكد من الاتصال بالإنترنت وحاول تاني. لم يتم تسجيل الاشتراك.');
-    return;
-  }
-  document.getElementById('manual-gym-modal').remove();
-  renderAdGm();renderAdGymSheet();renderGymAttendanceLog();renderAdmin();
-  alert('✅ تم تسجيل الاشتراك بنجاح\nالكود: #'+id+'\nينتهي: '+b.expiryLabel+attMsg);
-}
-
 function openCourtsDiagnostics(){
   if(!canEdit())return;
   // 1) All configured courts (real keys as actually stored in this installation)
@@ -5332,7 +5225,27 @@ function addOffer(){
 }
 
 // ======== BRANCHES MANAGEMENT (openSet) ========
-function clearAll(){if(!canEdit())return;if(!confirm('⚠️ حذف كل المشتركين والحجوزات نهائياً؟'))return;if(!confirm('تأكيد أخير!'))return;D.bookings=[];D.gymBookings=[];D.members=[];D.user=null;sessionStorage.removeItem('ft_u');saveAll().then(()=>{renderAdmin();document.getElementById('reg-card').style.display='block';document.getElementById('bk-card').style.display='none';document.getElementById('pending-card').style.display='none';document.getElementById('rejected-card').style.display='none';alert('✅ تم مسح البيانات');});}
+async function clearAll(){
+  if(!canEdit())return;
+  if(!confirm('⚠️ حذف كل المشتركين والحجوزات نهائياً؟'))return;
+  if(!confirm('تأكيد أخير! سيتم أخذ نسخة احتياطية تلقائية قبل المسح تحت مسار backups في فايربيز.'))return;
+  showLov(true);
+  await backupBeforeWipe();
+  D.bookings=[];D.gymBookings=[];D.members=[];D.user=null;
+  sessionStorage.removeItem('ft_u');
+  const ok=await saveAll(true); // force=true: هذا المسح متعمد فعلاً، تخطى قفل الحماية
+  showLov(false);
+  if(ok){
+    renderAdmin();
+    document.getElementById('reg-card').style.display='block';
+    document.getElementById('bk-card').style.display='none';
+    document.getElementById('pending-card').style.display='none';
+    document.getElementById('rejected-card').style.display='none';
+    alert('✅ تم مسح البيانات (وأُخذت نسخة احتياطية قبلها في backups/)');
+  } else {
+    alert('❌ حصل خطأ أثناء المسح، حاول تاني');
+  }
+}
 
 
 // ======== BRANCHES ========
